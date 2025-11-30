@@ -1,0 +1,193 @@
+#include "DHT.h"
+#include "WiFi.h"
+#include <HTTPClient.h>
+#include "EmsolIoTx.h"
+#include "SoftwareSerial.h"
+#include <map>
+#include <string>
+#include <ArduinoJson.h> // suhas changes: CRITICAL: Added to resolve JSON-related errors
+
+#define BUZZER_PIN 5
+#define LDR_PIN 34 // LDR connected to GPIO 34 (ADC1 Channel 6)
+#define DHTPIN 4 // Define the pin where the data wire is connected
+#define DHTTYPE DHT11 // Define the DHT type, either DHT11 or DHT22
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// Replace with your network credentials (STATION)
+char ssid[] = "";
+char pass[] = "";
+
+// curl -v -X POST http://54.251.153.72:8080/api/v1/jm9t48rur0cpqad8bp19/telemetry --header
+// Content-Type:application/json --data "{temperature:25}"
+
+const char* serverName = "http://54.251.153.72:8080/api/v1/bpehxziearrbicgxmt5k/telemetry";
+
+// WiFiClient espClient; // suhas changes: Retained, as per request
+// int status = WL_IDLE_STATUS; // suhas changes: Retained, as per request
+
+unsigned long previousMillis = 0; // Stores the last time an action was taken
+const long interval = 2000; // Interval for periodic action (2 seconds)
+unsigned int wifi_status = 0; // 1 = Connected, 0 = Disconnected/Connecting
+
+void WiFiStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("Connected to AP successfully!");
+}
+
+void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("WiFi connected");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    wifi_status = 1; // suhas changes: Set status flag on success
+}
+
+void WiFiStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("Disconnected from WiFi access point");
+    Serial.print("WiFi lost connection. Reason: ");
+    Serial.println(info.wifi_sta_disconnected.reason);
+    Serial.println("Trying to Reconnect");
+    wifi_status = 0;
+    WiFi.begin(ssid, pass);
+}
+
+void initWiFi() {
+    WiFi.begin(ssid, pass);
+    Serial.println("Connecting to WiFi Network.");
+    int retry = 1;
+    while (wifi_status != 1) {
+        Serial.print('.');
+        if (retry > 20) { // suhas changes: Increased timeout to 20s for robustness
+            break;
+        }
+        retry++;
+        delay(1000);
+    }
+    // suhas changes: Corrected the Wi-Fi logic block
+    if (wifi_status != 1) {
+        Serial.println("\nFailed to connect WiFi Network after 20 retries.");
+    } else {
+        Serial.println("\nWiFi connection established.");
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("Emsol Learning Kit Test");
+    dht.begin(); // suhas changes: Initialize DHT sensor
+    pinMode(BUZZER_PIN, OUTPUT); // suhas changes: Configure buzzer pin
+    
+    // delete old config
+    WiFi.disconnect(true);
+    delay(1000);
+    
+    // Set up Wi-Fi Event Handlers
+    WiFi.onEvent(WiFiStationConnected,
+    WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED);
+    WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+    WiFi.onEvent(WiFiStationDisconnected,
+    WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    
+    initWiFi();
+}
+
+void httpPostIoTx(float temperature, float humidity, float light_brightness){
+    //Your Domain name with URL path or IP address with path
+    // WiFiClient client; // suhas changes: Retained for the http.begin(client, serverName) call
+    
+    HTTPClient http;
+    // http.begin(client, serverName); // suhas changes: Simplified to standard HTTP for ESP32
+    http.begin(serverName);
+
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Accept","application/json");
+
+    const size_t capacity = JSON_OBJECT_SIZE(20);
+
+    DynamicJsonDocument doc(capacity);
+    doc["temperature"] = String(temperature, 2);
+    doc["humidity"] = String(humidity, 2);
+    doc["brightness"] = String(light_brightness, 2);
+    
+    String jsonString;
+    serializeJson(doc, jsonString);
+    
+    Serial.print("Serialized JSON: ");
+    Serial.println(jsonString);
+    
+    int httpResponseCode = http.POST(jsonString);
+    
+    Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+
+    // suhas changes: Added error checking feedback
+    if (httpResponseCode > 0) {
+        Serial.print("Server Response: ");
+        Serial.println(http.getString());
+    } else {
+        Serial.print("HTTP POST failed. Error: ");
+        Serial.println(http.errorToString(httpResponseCode));
+    }
+
+    http.end();
+}
+
+void loop(void) {
+    unsigned long currentMillis = millis(); // Get the current time
+    
+    // Check if 2 seconds have passed
+    if (currentMillis - previousMillis >= interval) {
+        previousMillis = currentMillis; // Save the last time the action was taken
+
+        // Reading temperature or humidity takes about 250 milliseconds!
+        float humidity = dht.readHumidity();
+        float temperature = dht.readTemperature(); // Reading temperature as Celsius
+
+        // Check if any reads failed and exit early (to try again).
+        if (isnan(humidity) || isnan(temperature)) {
+            humidity = 0;
+            temperature = 0;
+            Serial.println("Failed to read from DHT sensor!");
+        }else{
+            // Print the values to the serial monitor
+            Serial.print("Humidity: ");
+            Serial.print(humidity);
+            Serial.print(" %\t");
+            Serial.print("Temperature: ");
+            Serial.print(temperature);
+            Serial.println(" °C");
+        }
+        
+        int ldrValue = analogRead(LDR_PIN); // Read the value from the LDR
+        // Convert to brightness (0-100%)
+        float brightness = (ldrValue / 4095.0) * 100.0; 
+        
+        Serial.print("LDR Value (BRIGHTNESS): ");
+        if (brightness < 20) {
+            // suhas changes: Buzzer ON when Dark
+            digitalWrite(BUZZER_PIN, HIGH);
+            Serial.print(brightness); Serial.println("% => Dark ALARM!");
+        } else if (brightness < 40) {
+            // suhas changes: Buzzer OFF otherwise
+            digitalWrite(BUZZER_PIN, LOW);
+            Serial.print(brightness); Serial.println("% => Dim");
+        } else if (brightness < 60) {
+            // suhas changes: Buzzer OFF otherwise
+            digitalWrite(BUZZER_PIN, LOW);
+            Serial.print(brightness); Serial.println("% => Light");
+        } else if (brightness < 80) {
+            // suhas changes: Buzzer OFF otherwise
+            digitalWrite(BUZZER_PIN, LOW);
+            Serial.print(brightness); Serial.println("% => Bright");
+        } else {
+            // suhas changes: Buzzer OFF otherwise
+            digitalWrite(BUZZER_PIN, LOW);
+            Serial.print(brightness); Serial.println("% => Very bright");
+        }
+
+        if(wifi_status){
+            httpPostIoTx(temperature, humidity, brightness);
+        } else {
+             Serial.println("Wi-Fi not connected. Skipping data transmission."); // suhas changes: Added feedback
+        }
+    }
+}
